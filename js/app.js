@@ -365,7 +365,7 @@ const App = (() => {
    * Returns null if no match.
    */
   function _extractKm(punktId) {
-    const m = String(punktId).match(/^[TNtn]?(\d+)-\d+$/);
+    const m = String(punktId).match(/^[TNtn]?(\d+)-\d+[A-Za-z]*$/);
     return m ? parseInt(m[1], 10) : null;
   }
 
