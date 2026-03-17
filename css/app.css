@@ -185,6 +185,7 @@ html, body {
   justify-content: space-between;
   padding: 14px 16px;
   cursor: pointer;
+  -webkit-user-select: none;
   user-select: none;
 }
 .section-header h2 {
@@ -468,6 +469,60 @@ html, body {
 /* ============ CONFIRM DIALOG STYLES ============ */
 .confirm-text { margin-bottom: 16px; line-height: 1.6; }
 .warning-text { color: var(--error); font-weight: 500; }
+
+/* ============ PRESETS PANEL ============ */
+.presets-panel {
+  margin: 8px 8px 0;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.presets-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  gap: 8px;
+}
+.presets-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.presets-summary {
+  flex: 1;
+  font-size: 12px;
+  color: var(--on-surface-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+.presets-chevron { flex-shrink: 0; }
+.presets-panel.expanded .presets-chevron { transform: rotate(180deg); }
+.presets-body {
+  display: none;
+  padding: 0 14px 14px;
+}
+.presets-panel.expanded .presets-body { display: block; }
+.presets-body .form-group { margin-bottom: 8px; }
+.presets-body .form-group label { font-size: 11px; }
+.presets-body .form-group input,
+.presets-body .form-group select {
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+/* ============ DISABLED STATE ============ */
+.btn:disabled, .btn[disabled] {
+  opacity: 0.5;
+  pointer-events: none;
+}
 
 /* ============ RESPONSIVE ============ */
 @media (min-width: 481px) {

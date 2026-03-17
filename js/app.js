@@ -7,17 +7,35 @@ const App = (() => {
   let _photoSlotTarget = 0;
   const _photoBlobs = {}; // slot -> { blob, mimeType, fileName }
   const _photoURLs = {};  // slot -> objectURL (for display, must be revoked)
+  let _saving = false;    // debounce guard
+  let _formDirty = false; // unsaved changes tracking
 
   // ==================== INITIALIZATION ====================
 
   async function init() {
     try {
       await DB.open();
-      // Request persistent storage immediately
       const persisted = await DB.requestPersistentStorage();
       if (!persisted) {
         console.warn('Persistent storage not granted — data may be evicted by browser');
       }
+
+      // Check CDN dependencies loaded
+      if (typeof JSZip === 'undefined') {
+        console.error('JSZip not loaded — export will not work');
+      }
+      if (typeof proj4 === 'undefined') {
+        console.warn('proj4 not loaded — GK coordinate transform unavailable');
+      }
+
+      // Warn before leaving with unsaved form data
+      window.addEventListener('beforeunload', (e) => {
+        if (_formDirty) {
+          e.preventDefault();
+          e.returnValue = '';
+        }
+      });
+
       await showProjects();
     } catch (e) {
       console.error('Init failed:', e);
@@ -37,39 +55,43 @@ const App = (() => {
   async function showProjects() {
     _currentProject = null;
     showView('view-projects');
-    const projects = await DB.getAllProjects();
-    const list = document.getElementById('project-list');
-    const empty = document.getElementById('no-projects');
+    try {
+      const projects = await DB.getAllProjects();
+      const list = document.getElementById('project-list');
+      const empty = document.getElementById('no-projects');
 
-    if (projects.length === 0) {
-      list.innerHTML = '';
-      empty.style.display = 'flex';
-      return;
+      if (projects.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = 'flex';
+        return;
+      }
+      empty.style.display = 'none';
+
+      projects.sort((a, b) => new Date(b.angelegt) - new Date(a.angelegt));
+
+      let html = '';
+      for (const proj of projects) {
+        const points = await DB.getPointsByProject(proj.projektNummer);
+        const date = new Date(proj.angelegt).toLocaleDateString('de-DE');
+        html += `
+          <div class="list-item" onclick="App.selectProject('${_escAttr(proj.projektNummer)}')">
+            <div class="list-item-content">
+              <div class="list-item-title">${_escHtml(proj.bezeichnung || proj.projektNummer)}</div>
+              <div class="list-item-subtitle">${_escHtml(proj.projektNummer)} &middot; ${date}</div>
+            </div>
+            <span class="list-item-badge">${points.length}</span>
+            <div class="list-item-actions">
+              <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeleteProject('${_escAttr(proj.projektNummer)}')" title="Löschen">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+              </button>
+            </div>
+          </div>`;
+      }
+      list.innerHTML = html;
+    } catch (e) {
+      console.error('showProjects failed:', e);
+      showToast('Fehler beim Laden der Projekte', 'error');
     }
-    empty.style.display = 'none';
-
-    // Sort by creation date desc
-    projects.sort((a, b) => new Date(b.angelegt) - new Date(a.angelegt));
-
-    let html = '';
-    for (const proj of projects) {
-      const points = await DB.getPointsByProject(proj.projektNummer);
-      const date = new Date(proj.angelegt).toLocaleDateString('de-DE');
-      html += `
-        <div class="list-item" onclick="App.selectProject('${_escAttr(proj.projektNummer)}')">
-          <div class="list-item-content">
-            <div class="list-item-title">${_escHtml(proj.bezeichnung || proj.projektNummer)}</div>
-            <div class="list-item-subtitle">${_escHtml(proj.projektNummer)} &middot; ${date}</div>
-          </div>
-          <span class="list-item-badge">${points.length}</span>
-          <div class="list-item-actions">
-            <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeleteProject('${_escAttr(proj.projektNummer)}')" title="Löschen">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            </button>
-          </div>
-        </div>`;
-    }
-    list.innerHTML = html;
   }
 
   function showNewProjectDialog() {
@@ -102,10 +124,12 @@ const App = (() => {
     const existing = await DB.getProject(nr);
     if (existing) { showToast('Projekt existiert bereits', 'error'); return; }
 
+    const ersteller = document.getElementById('d-projErsteller').value.trim();
+
     await DB.saveProject({
       projektNummer: nr,
       bezeichnung: document.getElementById('d-projBez').value.trim() || nr,
-      ersteller: document.getElementById('d-projErsteller').value.trim(),
+      ersteller,
       angelegt: new Date().toISOString(),
     });
     closeDialog();
@@ -120,11 +144,13 @@ const App = (() => {
 
   async function confirmDeleteProject(projektNummer) {
     const points = await DB.getPointsByProject(projektNummer);
+    const photos = await DB.getPhotosByProject(projektNummer);
     const html = `
       <h3>Projekt löschen?</h3>
       <p class="confirm-text">
-        Projekt <strong>${_escHtml(projektNummer)}</strong> und alle
-        <strong>${points.length}</strong> Punkte mit Fotos werden unwiderruflich gelöscht.
+        Projekt <strong>${_escHtml(projektNummer)}</strong> mit
+        <strong>${points.length}</strong> Punkten und
+        <strong>${photos.length}</strong> Fotos wird unwiderruflich gelöscht.
       </p>
       <p class="warning-text">Diese Aktion kann nicht rückgängig gemacht werden!</p>
       <div class="btn-row">
@@ -135,63 +161,136 @@ const App = (() => {
   }
 
   async function doDeleteProject(projektNummer) {
-    await DB.deleteProject(projektNummer);
-    closeDialog();
-    showToast('Projekt gelöscht', 'success');
-    await showProjects();
+    try {
+      await DB.deleteProject(projektNummer);
+      // Clean up presets for this project
+      localStorage.removeItem(`sc_presets_${projektNummer}`);
+      closeDialog();
+      showToast('Projekt gelöscht', 'success');
+      await showProjects();
+    } catch (e) {
+      console.error('Delete project failed:', e);
+      showToast('Löschen fehlgeschlagen: ' + e.message, 'error');
+    }
+  }
+
+  // ==================== PRESETS ====================
+
+  function _getPresets() {
+    if (!_currentProject) return {};
+    try {
+      const raw = localStorage.getItem(`sc_presets_${_currentProject}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+
+  function savePresets() {
+    if (!_currentProject) return;
+    const presets = {
+      strecke: document.getElementById('p-strecke')?.value?.trim() || '',
+      art: document.getElementById('p-art')?.value || '',
+      gicCode: document.getElementById('p-gicCode')?.value?.trim() || '',
+      erfasser: document.getElementById('p-erfasser')?.value?.trim() || '',
+    };
+    localStorage.setItem(`sc_presets_${_currentProject}`, JSON.stringify(presets));
+    _updatePresetsSummary(presets);
+  }
+
+  function _loadPresets() {
+    const presets = _getPresets();
+    document.getElementById('p-strecke').value = presets.strecke || '';
+    document.getElementById('p-art').value = presets.art || '';
+    document.getElementById('p-gicCode').value = presets.gicCode || '';
+
+    // Erfasser: use preset if set, otherwise fall back to project ersteller
+    if (presets.erfasser) {
+      document.getElementById('p-erfasser').value = presets.erfasser;
+    } else {
+      // Auto-fill from project ersteller on first load
+      DB.getProject(_currentProject).then(proj => {
+        if (proj?.ersteller && !document.getElementById('p-erfasser').value) {
+          document.getElementById('p-erfasser').value = proj.ersteller;
+          savePresets();
+        }
+      }).catch(() => {});
+    }
+    _updatePresetsSummary(presets);
+  }
+
+  function _updatePresetsSummary(presets) {
+    const parts = [];
+    if (presets.strecke) parts.push('Str. ' + presets.strecke);
+    if (presets.art) parts.push(Models.displayName(Models.PunktArt, presets.art));
+    if (presets.erfasser) parts.push(presets.erfasser);
+    document.getElementById('presets-summary').textContent = parts.join(' | ');
+  }
+
+  function togglePresets() {
+    document.getElementById('presets-panel').classList.toggle('expanded');
   }
 
   // ==================== POINTS LIST ====================
 
   async function showPoints() {
     showView('view-points');
-    const proj = await DB.getProject(_currentProject);
-    document.getElementById('points-title').textContent = proj?.bezeichnung || _currentProject;
+    _formDirty = false;
 
-    const points = await DB.getPointsByProject(_currentProject);
-    const list = document.getElementById('point-list');
-    const empty = document.getElementById('no-points');
+    try {
+      const proj = await DB.getProject(_currentProject);
+      document.getElementById('points-title').textContent = proj?.bezeichnung || _currentProject;
 
-    if (points.length === 0) {
-      list.innerHTML = '';
-      empty.style.display = 'flex';
-      return;
-    }
-    empty.style.display = 'none';
+      // Load presets
+      _loadPresets();
 
-    points.sort((a, b) => new Date(b.erfassungsdatum) - new Date(a.erfassungsdatum));
+      const points = await DB.getPointsByProject(_currentProject);
+      const list = document.getElementById('point-list');
+      const empty = document.getElementById('no-points');
 
-    let html = '';
-    for (const p of points) {
-      const photoCount = [p.foto1, p.foto2, p.foto3, p.foto4, p.foto5].filter(Boolean).length;
-      const date = new Date(p.erfassungsdatum).toLocaleDateString('de-DE');
-      const station = p.station != null ? ` km ${p.station}` : '';
-      html += `
-        <div class="list-item" onclick="App.editPoint('${_escAttr(p.punktId)}')">
-          <div class="list-item-content">
-            <div class="list-item-title">
-              <span class="badge badge-${p.art}">${Models.displayName(Models.PunktArt, p.art)}</span>
-              ${_escHtml(p.punktId)}
+      if (points.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = 'flex';
+        return;
+      }
+      empty.style.display = 'none';
+
+      points.sort((a, b) => new Date(b.erfassungsdatum) - new Date(a.erfassungsdatum));
+
+      let html = '';
+      for (const p of points) {
+        const photoCount = [p.foto1, p.foto2, p.foto3, p.foto4, p.foto5].filter(Boolean).length;
+        const date = new Date(p.erfassungsdatum).toLocaleDateString('de-DE');
+        const station = p.station != null ? ` km ${p.station}` : '';
+        html += `
+          <div class="list-item" onclick="App.editPoint('${_escAttr(p.punktId)}')">
+            <div class="list-item-content">
+              <div class="list-item-title">
+                <span class="badge badge-${p.art}">${Models.displayName(Models.PunktArt, p.art)}</span>
+                ${_escHtml(p.punktId)}
+              </div>
+              <div class="list-item-subtitle">
+                Str. ${_escHtml(p.strecke)}${station} &middot; ${_escHtml(Models.displayName(Models.Seite, p.seite))} &middot; ${date}
+                ${photoCount > 0 ? ' &middot; ' + photoCount + ' Foto(s)' : ''}
+              </div>
             </div>
-            <div class="list-item-subtitle">
-              Str. ${_escHtml(p.strecke)}${station} &middot; ${_escHtml(Models.displayName(Models.Seite, p.seite))} &middot; ${date}
-              ${photoCount > 0 ? ' &middot; ' + photoCount + ' Foto(s)' : ''}
+            <div class="list-item-actions">
+              <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeletePoint('${_escAttr(p.punktId)}')" title="Löschen">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+              </button>
             </div>
-          </div>
-          <div class="list-item-actions">
-            <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeletePoint('${_escAttr(p.punktId)}')" title="Löschen">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            </button>
-          </div>
-        </div>`;
+          </div>`;
+      }
+      list.innerHTML = html;
+    } catch (e) {
+      console.error('showPoints failed:', e);
+      showToast('Fehler beim Laden der Punkte', 'error');
     }
-    list.innerHTML = html;
   }
 
   async function confirmDeletePoint(punktId) {
+    const photos = await DB.getPhotosByPoint(punktId);
     const html = `
       <h3>Punkt löschen?</h3>
-      <p class="confirm-text">Punkt <strong>${_escHtml(punktId)}</strong> mit allen Fotos wird unwiderruflich gelöscht.</p>
+      <p class="confirm-text">Punkt <strong>${_escHtml(punktId)}</strong> mit ${photos.length} Foto(s) wird unwiderruflich gelöscht.</p>
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="App.closeDialog()">Abbrechen</button>
         <button class="btn btn-danger" onclick="App.doDeletePoint('${_escAttr(punktId)}')">Löschen</button>
@@ -200,16 +299,23 @@ const App = (() => {
   }
 
   async function doDeletePoint(punktId) {
-    await DB.deletePoint(punktId);
-    closeDialog();
-    showToast('Punkt gelöscht', 'success');
-    await showPoints();
+    try {
+      await DB.deletePoint(punktId);
+      closeDialog();
+      showToast('Punkt gelöscht', 'success');
+      await showPoints();
+    } catch (e) {
+      console.error('Delete point failed:', e);
+      showToast('Löschen fehlgeschlagen: ' + e.message, 'error');
+    }
   }
 
   // ==================== POINT FORM ====================
 
   function showPointForm(existingPoint) {
     _editingPoint = existingPoint || null;
+    _formDirty = false;
+    _saving = false;
     _clearPhotoState();
 
     document.getElementById('point-form-title').textContent =
@@ -218,15 +324,21 @@ const App = (() => {
     const form = document.getElementById('point-form');
     form.reset();
 
+    // Make punkt-ID editable again (reset readOnly from previous edits)
+    document.getElementById('f-punktId').readOnly = false;
+
     if (existingPoint) {
       _populateForm(existingPoint);
     } else {
-      // Defaults
-      document.getElementById('f-art').value = 'ps4';
+      // Apply presets
+      const presets = _getPresets();
+      document.getElementById('f-art').value = presets.art || 'ps4';
       document.getElementById('f-seite').value = 'rechts';
-      // Restore last used erfasser from localStorage
-      const lastErfasser = localStorage.getItem('sc_lastErfasser');
-      if (lastErfasser) document.getElementById('f-erfasser').value = lastErfasser;
+      if (presets.strecke) document.getElementById('f-strecke').value = presets.strecke;
+      if (presets.gicCode) document.getElementById('f-gicCode').value = presets.gicCode;
+      if (presets.erfasser) {
+        document.getElementById('f-erfasser').value = presets.erfasser;
+      }
     }
 
     onArtChanged();
@@ -238,104 +350,153 @@ const App = (() => {
       if (i === 0) s.classList.add('expanded');
       else if (!existingPoint) s.classList.remove('expanded');
     });
+
+    // Track dirty state
+    _installDirtyTracking();
+  }
+
+  function _installDirtyTracking() {
+    const form = document.getElementById('point-form');
+    const handler = () => { _formDirty = true; };
+    form.addEventListener('input', handler, { once: false });
+    form.addEventListener('change', handler, { once: false });
   }
 
   async function editPoint(punktId) {
-    const point = await DB.getPoint(punktId);
-    if (!point) { showToast('Punkt nicht gefunden', 'error'); return; }
-    showPointForm(point);
-    // Load existing photo previews
-    for (let slot = 1; slot <= 5; slot++) {
-      if (point[`foto${slot}`]) {
-        const url = await DB.getPhotoURL(punktId, slot);
-        if (url) {
-          _photoURLs[slot] = url;
-          _showPhotoPreview(slot, url);
-          // Mark as existing (not a new blob)
-          _photoBlobs[slot] = { existing: true };
+    try {
+      const point = await DB.getPoint(punktId);
+      if (!point) { showToast('Punkt nicht gefunden', 'error'); return; }
+      showPointForm(point);
+      // Load existing photo previews
+      for (let slot = 1; slot <= 5; slot++) {
+        if (point[`foto${slot}`]) {
+          try {
+            const url = await DB.getPhotoURL(punktId, slot);
+            if (url) {
+              _photoURLs[slot] = url;
+              _showPhotoPreview(slot, url);
+              _photoBlobs[slot] = { existing: true };
+            }
+          } catch (e) {
+            console.warn(`Photo ${slot} for ${punktId} could not be loaded:`, e);
+          }
         }
       }
+    } catch (e) {
+      console.error('editPoint failed:', e);
+      showToast('Fehler beim Laden des Punktes', 'error');
     }
   }
 
   function cancelPointForm() {
+    if (_formDirty) {
+      const html = `
+        <h3>Änderungen verwerfen?</h3>
+        <p class="confirm-text">Es gibt ungespeicherte Änderungen. Wirklich abbrechen?</p>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="App.closeDialog()">Weiter bearbeiten</button>
+          <button class="btn btn-danger" onclick="App.closeDialog();App._doCancel()">Verwerfen</button>
+        </div>`;
+      showDialog(html);
+    } else {
+      _doCancel();
+    }
+  }
+
+  function _doCancel() {
+    _formDirty = false;
     _clearPhotoState();
     if (_currentProject) showPoints();
     else showProjects();
   }
 
   async function savePoint() {
-    const form = document.getElementById('point-form');
-    const punktId = document.getElementById('f-punktId').value.trim();
-    const strecke = document.getElementById('f-strecke').value.trim();
-    const erfasser = document.getElementById('f-erfasser').value.trim();
-
-    if (!punktId || !strecke || !erfasser) {
-      showToast('Bitte alle Pflichtfelder (*) ausfüllen', 'error');
-      return;
-    }
-
-    // Check for duplicate ID (only when creating new)
-    if (!_editingPoint) {
-      const existing = await DB.getPoint(punktId);
-      if (existing) {
-        showToast('Punkt-ID existiert bereits', 'error');
-        return;
-      }
-    }
-
-    // Save erfasser for next time
-    localStorage.setItem('sc_lastErfasser', erfasser);
-
-    const art = document.getElementById('f-art').value;
-
-    // Build point data
-    const pointData = {
-      punktId,
-      station: _parseFloat('f-station'),
-      strecke,
-      seite: document.getElementById('f-seite').value,
-      art,
-      gicCode: document.getElementById('f-gicCode').value.trim() || null,
-      erfassungsdatum: _editingPoint?.erfassungsdatum || new Date().toISOString(),
-      erfasser,
-      neuOderBestand: document.getElementById('f-neuOderBestand').value,
-      gnssTauglichkeit: document.getElementById('f-gnssTauglichkeit').value || null,
-      rilKonformitaet: document.getElementById('f-rilKonformitaet').value,
-      status: document.getElementById('f-status').value,
-      einmessskizze: document.getElementById('f-einmessskizze').value,
-      // Coordinates
-      gpsLatitude: _parseFloat('f-gpsLatitude'),
-      gpsLongitude: _parseFloat('f-gpsLongitude'),
-      hoehe: _parseFloat('f-hoehe'),
-      gpsAccuracy: _parseFloat('f-gpsAccuracy'),
-      dbrefX: _parseFloat('f-dbrefX'),
-      dbrefY: _parseFloat('f-dbrefY'),
-      gkZone: _parseInt('f-gkZone'),
-      bemerkungen: document.getElementById('f-bemerkungen').value.trim() || null,
-      projektNummer: _currentProject,
-    };
-
-    // Photo flags (true if slot has a photo)
-    for (let slot = 1; slot <= 5; slot++) {
-      pointData[`foto${slot}`] = _photoBlobs[slot] ? true : null;
-    }
-
-    // Art-specific fields
-    _readArtSpecificFields(pointData, art);
-
-    // Collect new photo blobs (skip ones marked as "existing")
-    const newPhotos = {};
-    for (const [slot, data] of Object.entries(_photoBlobs)) {
-      if (data && !data.existing && data.blob) {
-        newPhotos[slot] = data;
-      }
-    }
+    // Debounce rapid clicks
+    if (_saving) return;
+    _saving = true;
 
     try {
+      const punktId = document.getElementById('f-punktId').value.trim();
+      const strecke = document.getElementById('f-strecke').value.trim();
+      const erfasser = document.getElementById('f-erfasser').value.trim();
+
+      if (!punktId || !strecke || !erfasser) {
+        showToast('Bitte alle Pflichtfelder (*) ausfüllen', 'error');
+        _saving = false;
+        return;
+      }
+
+      // Check for duplicate ID (only when creating new)
+      if (!_editingPoint) {
+        const existing = await DB.getPoint(punktId);
+        if (existing) {
+          showToast('Punkt-ID existiert bereits', 'error');
+          _saving = false;
+          return;
+        }
+      }
+
+      // Save erfasser for next time
+      localStorage.setItem('sc_lastErfasser', erfasser);
+
+      const art = document.getElementById('f-art').value;
+
+      // Build point data
+      const pointData = {
+        punktId,
+        station: _parseFloat('f-station'),
+        strecke,
+        seite: document.getElementById('f-seite').value,
+        art,
+        gicCode: document.getElementById('f-gicCode').value.trim() || null,
+        erfassungsdatum: _editingPoint?.erfassungsdatum || new Date().toISOString(),
+        erfasser,
+        neuOderBestand: document.getElementById('f-neuOderBestand').value,
+        gnssTauglichkeit: document.getElementById('f-gnssTauglichkeit').value || null,
+        rilKonformitaet: document.getElementById('f-rilKonformitaet').value,
+        status: document.getElementById('f-status').value,
+        einmessskizze: document.getElementById('f-einmessskizze').value,
+        gpsLatitude: _parseFloat('f-gpsLatitude'),
+        gpsLongitude: _parseFloat('f-gpsLongitude'),
+        hoehe: _parseFloat('f-hoehe'),
+        gpsAccuracy: _parseFloat('f-gpsAccuracy'),
+        dbrefX: _parseFloat('f-dbrefX'),
+        dbrefY: _parseFloat('f-dbrefY'),
+        gkZone: _parseInt('f-gkZone'),
+        bemerkungen: document.getElementById('f-bemerkungen').value.trim() || null,
+        projektNummer: _currentProject,
+      };
+
+      // Photo flags
+      for (let slot = 1; slot <= 5; slot++) {
+        pointData[`foto${slot}`] = _photoBlobs[slot] ? true : null;
+      }
+
+      // Art-specific fields
+      _readArtSpecificFields(pointData, art);
+
+      // Collect new photo blobs (skip ones marked as "existing")
+      const newPhotos = {};
+      for (const [slot, data] of Object.entries(_photoBlobs)) {
+        if (data && !data.existing && data.blob) {
+          newPhotos[slot] = data;
+        }
+      }
+
+      // Check storage before saving large photos
+      const totalNewBytes = Object.values(newPhotos).reduce((sum, p) => sum + (p.blob?.size || 0), 0);
+      if (totalNewBytes > 0) {
+        const storageOk = await _checkStorageQuota(totalNewBytes);
+        if (!storageOk) {
+          _saving = false;
+          return;
+        }
+      }
+
       showLoading('Speichere Punkt...');
       await DB.savePointWithPhotos(pointData, newPhotos);
       hideLoading();
+      _formDirty = false;
       _clearPhotoState();
       showToast('Punkt gespeichert', 'success');
       await showPoints();
@@ -343,7 +504,35 @@ const App = (() => {
       hideLoading();
       console.error('Save failed:', e);
       showToast('Speichern fehlgeschlagen: ' + e.message, 'error');
+    } finally {
+      _saving = false;
     }
+  }
+
+  /**
+   * Checks if there is enough storage quota for the given bytes.
+   * Warns user if quota is critically low.
+   */
+  async function _checkStorageQuota(bytesNeeded) {
+    try {
+      const est = await DB.getStorageEstimate();
+      if (est.quota > 0) {
+        const remaining = est.quota - est.usage;
+        const marginFactor = 1.5; // require 1.5x the needed space as safety margin
+        if (remaining < bytesNeeded * marginFactor) {
+          showToast(`Speicher knapp! Nur noch ${(remaining / (1024*1024)).toFixed(0)} MB frei. Bitte exportieren und Punkte löschen.`, 'error');
+          return false;
+        }
+        // Warn at 80% usage
+        const pctUsed = (est.usage / est.quota) * 100;
+        if (pctUsed > 80) {
+          showToast(`Speicher zu ${pctUsed.toFixed(0)}% belegt — bald exportieren!`, 'error');
+        }
+      }
+    } catch (e) {
+      console.warn('Storage estimate failed:', e);
+    }
+    return true;
   }
 
   // ==================== ART-SPECIFIC FIELDS ====================
@@ -444,7 +633,6 @@ const App = (() => {
       _restorePs4DynamicValues(_editingPoint, va);
     }
 
-    // Target checkbox listener
     const targetCb = document.getElementById('f-ps4TargetVorhanden');
     if (targetCb) targetCb.addEventListener('change', _onTargetChanged);
     const pfTargetCb = document.getElementById('f-ps4GvPfostenTargetVorhanden');
@@ -497,19 +685,77 @@ const App = (() => {
     if (!file) return;
     const slot = _photoSlotTarget;
 
+    // Validate it's actually an image
+    if (!file.type.startsWith('image/')) {
+      showToast('Nur Bilddateien erlaubt', 'error');
+      return;
+    }
+
+    // Warn if file is very large (>15 MB)
+    if (file.size > 15 * 1024 * 1024) {
+      showToast('Foto ist sehr groß (' + (file.size / (1024*1024)).toFixed(1) + ' MB). Komprimierung empfohlen.', 'error');
+    }
+
+    // Compress if > 3 MB
+    let blob = file;
+    if (file.size > 3 * 1024 * 1024 && file.type.startsWith('image/')) {
+      try {
+        blob = await _compressImage(file, 1920, 0.85);
+      } catch (e) {
+        console.warn('Compression failed, using original:', e);
+        blob = file;
+      }
+    }
+
     // Revoke old URL if any
     if (_photoURLs[slot]) URL.revokeObjectURL(_photoURLs[slot]);
 
     _photoBlobs[slot] = {
-      blob: file,
-      mimeType: file.type || 'image/jpeg',
+      blob,
+      mimeType: blob.type || 'image/jpeg',
       fileName: file.name,
     };
 
-    const url = URL.createObjectURL(file);
+    const url = URL.createObjectURL(blob);
     _photoURLs[slot] = url;
     _showPhotoPreview(slot, url);
     _updatePhotoCount();
+    _formDirty = true;
+  }
+
+  /**
+   * Compresses an image file using canvas.
+   * Returns a new Blob.
+   */
+  function _compressImage(file, maxDim, quality) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const scale = maxDim / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob(
+          (blob) => blob ? resolve(blob) : reject(new Error('Canvas toBlob failed')),
+          'image/jpeg',
+          quality
+        );
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Image load failed'));
+      };
+      img.src = url;
+    });
   }
 
   function removePhoto(slot) {
@@ -518,21 +764,27 @@ const App = (() => {
     delete _photoURLs[slot];
 
     const slotEl = document.querySelector(`.photo-slot[data-slot="${slot}"]`);
-    slotEl.classList.remove('has-photo');
-    slotEl.querySelector('.photo-preview').style.display = 'none';
-    slotEl.querySelector('.photo-placeholder').style.display = 'flex';
-    slotEl.querySelector('.photo-remove').style.display = 'none';
+    if (slotEl) {
+      slotEl.classList.remove('has-photo');
+      slotEl.querySelector('.photo-preview').style.display = 'none';
+      slotEl.querySelector('.photo-placeholder').style.display = 'flex';
+      slotEl.querySelector('.photo-remove').style.display = 'none';
+    }
 
     // If editing, also delete from DB
     if (_editingPoint) {
-      DB.deletePhoto(_editingPoint.punktId, slot).catch(console.error);
+      DB.deletePhoto(_editingPoint.punktId, slot).catch(e =>
+        console.warn('Photo delete from DB failed:', e)
+      );
     }
 
     _updatePhotoCount();
+    _formDirty = true;
   }
 
   function _showPhotoPreview(slot, url) {
     const slotEl = document.querySelector(`.photo-slot[data-slot="${slot}"]`);
+    if (!slotEl) return;
     slotEl.classList.add('has-photo');
     const img = slotEl.querySelector('.photo-preview');
     img.src = url;
@@ -543,21 +795,25 @@ const App = (() => {
 
   function _updatePhotoCount() {
     const count = Object.keys(_photoBlobs).length;
-    document.getElementById('photo-count').textContent = `(${count}/5)`;
+    const el = document.getElementById('photo-count');
+    if (el) el.textContent = `(${count}/5)`;
   }
 
   function _clearPhotoState() {
     for (const url of Object.values(_photoURLs)) {
-      URL.revokeObjectURL(url);
+      try { URL.revokeObjectURL(url); } catch {}
     }
     for (const key of Object.keys(_photoBlobs)) delete _photoBlobs[key];
     for (const key of Object.keys(_photoURLs)) delete _photoURLs[key];
 
     document.querySelectorAll('.photo-slot').forEach(s => {
       s.classList.remove('has-photo');
-      s.querySelector('.photo-preview').style.display = 'none';
-      s.querySelector('.photo-placeholder').style.display = 'flex';
-      s.querySelector('.photo-remove').style.display = 'none';
+      const preview = s.querySelector('.photo-preview');
+      if (preview) { preview.style.display = 'none'; preview.src = ''; }
+      const ph = s.querySelector('.photo-placeholder');
+      if (ph) ph.style.display = 'flex';
+      const rm = s.querySelector('.photo-remove');
+      if (rm) rm.style.display = 'none';
     });
   }
 
@@ -565,7 +821,7 @@ const App = (() => {
 
   function captureGPS() {
     if (!navigator.geolocation) {
-      showToast('GPS nicht verfügbar', 'error');
+      showToast('GPS nicht verfügbar in diesem Browser', 'error');
       return;
     }
     showToast('GPS wird erfasst...');
@@ -579,12 +835,18 @@ const App = (() => {
         if (pos.coords.accuracy != null) {
           document.getElementById('f-gpsAccuracy').value = pos.coords.accuracy.toFixed(1);
         }
-        showToast('GPS-Position erfasst', 'success');
+        _formDirty = true;
+        showToast(`GPS erfasst (±${pos.coords.accuracy?.toFixed(0) || '?'} m)`, 'success');
       },
       (err) => {
-        showToast('GPS-Fehler: ' + err.message, 'error');
+        const msgs = {
+          1: 'GPS-Zugriff verweigert. Bitte in den Browser-Einstellungen erlauben.',
+          2: 'GPS-Position nicht verfügbar.',
+          3: 'GPS-Zeitüberschreitung. Bitte erneut versuchen.',
+        };
+        showToast(msgs[err.code] || 'GPS-Fehler: ' + err.message, 'error');
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   }
 
@@ -616,6 +878,12 @@ const App = (() => {
   }
 
   async function doExport(format) {
+    if (typeof JSZip === 'undefined') {
+      closeDialog();
+      showToast('Export nicht möglich — JSZip-Bibliothek konnte nicht geladen werden', 'error');
+      return;
+    }
+
     closeDialog();
     const points = await DB.getPointsByProject(_currentProject);
     if (points.length === 0) {
@@ -623,7 +891,7 @@ const App = (() => {
       return;
     }
 
-    showLoading('Exportiere...');
+    showLoading(`Exportiere ${points.length} Punkte...`);
     try {
       let filename;
       switch (format) {
@@ -641,7 +909,7 @@ const App = (() => {
           break;
       }
       hideLoading();
-      showToast(`Export: ${filename}`, 'success');
+      showToast(`Export erstellt: ${filename}`, 'success');
     } catch (e) {
       hideLoading();
       console.error('Export failed:', e);
@@ -673,7 +941,7 @@ const App = (() => {
     el.className = 'toast' + (type ? ' ' + type : '');
     el.style.display = 'block';
     clearTimeout(_toastTimer);
-    _toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
+    _toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3500);
   }
 
   function showLoading(text) {
@@ -832,7 +1100,6 @@ const App = (() => {
         break;
       case 'ps4':
         _setVal('f-ps4Vermarkungsart', p.ps4Vermarkungsart);
-        // Dynamic fields will be restored after sub-change fires
         break;
       case 'tp':
       case 'lhp':
@@ -876,11 +1143,11 @@ const App = (() => {
 
   function _escHtml(s) {
     if (!s) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
   function _escAttr(s) {
     if (!s) return '';
-    return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   }
 
   // ==================== INIT ON LOAD ====================
@@ -896,5 +1163,9 @@ const App = (() => {
     captureGPS, toggleSection,
     showExportDialog, doExport,
     showDialog, closeDialog, showToast,
+    // Presets
+    togglePresets, savePresets,
+    // Internal (exposed for dialog callback)
+    _doCancel,
   };
 })();

@@ -21,13 +21,11 @@ const DB = (() => {
       req.onupgradeneeded = (e) => {
         const db = e.target.result;
 
-        // Projects store
         if (!db.objectStoreNames.contains('projects')) {
           const ps = db.createObjectStore('projects', { keyPath: 'projektNummer' });
           ps.createIndex('angelegt', 'angelegt');
         }
 
-        // Points store
         if (!db.objectStoreNames.contains('points')) {
           const pts = db.createObjectStore('points', { keyPath: 'punktId' });
           pts.createIndex('projektNummer', 'projektNummer');
@@ -35,8 +33,6 @@ const DB = (() => {
           pts.createIndex('erfassungsdatum', 'erfassungsdatum');
         }
 
-        // Photos store — separate store for blob safety
-        // key: "{punktId}_{slot}" e.g. "PS12345_1"
         if (!db.objectStoreNames.contains('photos')) {
           const phs = db.createObjectStore('photos', { keyPath: 'id' });
           phs.createIndex('punktId', 'punktId');
@@ -46,9 +42,20 @@ const DB = (() => {
 
       req.onsuccess = (e) => {
         _db = e.target.result;
+        // Auto-reconnect if browser closes the connection
+        _db.onclose = () => {
+          console.warn('IndexedDB connection closed unexpectedly, will reconnect on next operation');
+          _db = null;
+        };
+        _db.onerror = (ev) => {
+          console.error('IndexedDB error:', ev.target.error);
+        };
         resolve(_db);
       };
       req.onerror = (e) => reject(e.target.error);
+      req.onblocked = () => {
+        console.warn('IndexedDB open blocked — close other tabs using this app');
+      };
     });
   }
 
@@ -56,10 +63,18 @@ const DB = (() => {
    * Generic transaction helper.
    */
   function tx(storeNames, mode = 'readonly') {
-    if (!_db) throw new Error('DB not initialized');
+    if (!_db) throw new Error('DB not initialized — call open() first');
     const names = Array.isArray(storeNames) ? storeNames : [storeNames];
-    const transaction = _db.transaction(names, mode);
-    return transaction;
+    try {
+      return _db.transaction(names, mode);
+    } catch (e) {
+      // Connection may have been closed; reset so next open() reconnects
+      if (e.name === 'InvalidStateError') {
+        _db = null;
+        throw new Error('Datenbankverbindung verloren. Bitte Aktion wiederholen.');
+      }
+      throw e;
+    }
   }
 
   /**
@@ -78,8 +93,22 @@ const DB = (() => {
   function txComplete(transaction) {
     return new Promise((resolve, reject) => {
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error || new Error('Transaction aborted'));
+      transaction.onerror = (e) => {
+        const err = transaction.error || e.target?.error;
+        if (err?.name === 'QuotaExceededError') {
+          reject(new Error('Speicher voll! Bitte exportieren und alte Punkte löschen.'));
+        } else {
+          reject(err || new Error('Transaction error'));
+        }
+      };
+      transaction.onabort = (e) => {
+        const err = transaction.error || e.target?.error;
+        if (err?.name === 'QuotaExceededError') {
+          reject(new Error('Speicher voll! Bitte exportieren und alte Punkte löschen.'));
+        } else {
+          reject(err || new Error('Transaction aborted'));
+        }
+      };
     });
   }
 

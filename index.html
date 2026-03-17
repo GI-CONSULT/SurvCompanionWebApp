@@ -41,6 +41,45 @@
       </button>
     </header>
     <main class="content">
+      <!-- Voreinstellungen -->
+      <div id="presets-panel" class="presets-panel">
+        <div class="presets-header" onclick="App.togglePresets()">
+          <span class="presets-label">Voreinstellungen</span>
+          <span id="presets-summary" class="presets-summary"></span>
+          <svg class="chevron presets-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div id="presets-body" class="presets-body">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="p-strecke">Strecke</label>
+              <input type="text" id="p-strecke" placeholder="z.B. 1234" oninput="App.savePresets()">
+            </div>
+            <div class="form-group flex-1">
+              <label for="p-art">Punktart</label>
+              <select id="p-art" onchange="App.savePresets()">
+                <option value="">-- keine --</option>
+                <option value="ps0">PS0</option>
+                <option value="ps1">PS1</option>
+                <option value="ps2">PS2</option>
+                <option value="ps3">PS3</option>
+                <option value="ps4">PS4</option>
+                <option value="tp">TP</option>
+                <option value="lhp">LHP</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="p-gicCode">GIC-Code</label>
+              <input type="text" id="p-gicCode" placeholder="100-157" inputmode="numeric" oninput="App.savePresets()">
+            </div>
+            <div class="form-group flex-1">
+              <label for="p-erfasser">Erfasser</label>
+              <input type="text" id="p-erfasser" placeholder="Name" oninput="App.savePresets()">
+            </div>
+          </div>
+        </div>
+      </div>
       <div id="point-list" class="list"></div>
       <div id="no-points" class="empty-state" style="display:none">
         <p>Keine Punkte erfasst</p>
