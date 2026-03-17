@@ -78,6 +78,10 @@
               <input type="text" id="p-erfasser" placeholder="Name" oninput="App.savePresets()">
             </div>
           </div>
+          <div class="checkbox-group">
+            <input type="checkbox" id="p-targetVorhanden" onchange="App.savePresets()">
+            <label for="p-targetVorhanden">Target vorhanden</label>
+          </div>
         </div>
       </div>
       <div id="point-list" class="list"></div>

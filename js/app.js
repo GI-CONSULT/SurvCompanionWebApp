@@ -191,6 +191,7 @@ const App = (() => {
       art: document.getElementById('p-art')?.value || '',
       gicCode: document.getElementById('p-gicCode')?.value?.trim() || '',
       erfasser: document.getElementById('p-erfasser')?.value?.trim() || '',
+      targetVorhanden: document.getElementById('p-targetVorhanden')?.checked || false,
     };
     localStorage.setItem(`sc_presets_${_currentProject}`, JSON.stringify(presets));
     _updatePresetsSummary(presets);
@@ -201,6 +202,7 @@ const App = (() => {
     document.getElementById('p-strecke').value = presets.strecke || '';
     document.getElementById('p-art').value = presets.art || '';
     document.getElementById('p-gicCode').value = presets.gicCode || '';
+    document.getElementById('p-targetVorhanden').checked = !!presets.targetVorhanden;
 
     // Erfasser: use preset if set, otherwise fall back to project ersteller
     if (presets.erfasser) {
@@ -222,6 +224,7 @@ const App = (() => {
     if (presets.strecke) parts.push('Str. ' + presets.strecke);
     if (presets.art) parts.push(Models.displayName(Models.PunktArt, presets.art));
     if (presets.erfasser) parts.push(presets.erfasser);
+    if (presets.targetVorhanden) parts.push('Target');
     document.getElementById('presets-summary').textContent = parts.join(' | ');
   }
 
@@ -342,6 +345,18 @@ const App = (() => {
     }
 
     onArtChanged();
+
+    // Apply target preset for new points (after art-specific fields are rendered)
+    if (!existingPoint) {
+      const presets = _getPresets();
+      if (presets.targetVorhanden) {
+        const targetCb = document.getElementById('f-ps4TargetVorhanden');
+        if (targetCb) { targetCb.checked = true; _onTargetChanged(); }
+        const pfTargetCb = document.getElementById('f-ps4GvPfostenTargetVorhanden');
+        if (pfTargetCb) { pfTargetCb.checked = true; _onPfostenTargetChanged(); }
+      }
+    }
+
     _updatePhotoCount();
     showView('view-point-form');
 
@@ -1033,9 +1048,9 @@ const App = (() => {
   }
 
   function _fieldCheckbox(name, label) {
-    return `<div class="form-group" style="display:flex;align-items:center;gap:8px">
-      <input type="checkbox" id="f-${name}" style="width:auto">
-      <label for="f-${name}" style="margin:0;text-transform:none;font-size:15px">${label}</label>
+    return `<div class="checkbox-group">
+      <input type="checkbox" id="f-${name}">
+      <label for="f-${name}">${label}</label>
     </div>`;
   }
 
