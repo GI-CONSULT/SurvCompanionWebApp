@@ -1208,7 +1208,21 @@ const App = (() => {
 
     showLoading('GeoJSON wird eingelesen...');
     try {
-      const text = await file.text();
+      let text = await file.text();
+
+      // Strip BOM and any non-JSON prefix (Outlook/OneDrive may prepend metadata)
+      text = text.replace(/^\uFEFF/, ''); // UTF-8 BOM
+      const jsonStart = text.indexOf('{');
+      if (jsonStart > 0) {
+        console.warn(`GeoJSON: skipping ${jsonStart} leading bytes of non-JSON data`);
+        text = text.substring(jsonStart);
+      }
+      // Also trim trailing garbage after last }
+      const jsonEnd = text.lastIndexOf('}');
+      if (jsonEnd >= 0 && jsonEnd < text.length - 1) {
+        text = text.substring(0, jsonEnd + 1);
+      }
+
       const geojson = JSON.parse(text);
 
       if (geojson.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) {
