@@ -893,27 +893,90 @@ const App = (() => {
 
     showLoading(`Exportiere ${points.length} Punkte...`);
     try {
-      let filename;
+      let result;
       switch (format) {
         case 'unified':
-          filename = await ExportService.exportUnified(points, _currentProject);
+          result = await ExportService.exportUnified(points, _currentProject);
           break;
         case 'csv':
-          filename = await ExportService.exportCSVWithPhotos(points, _currentProject);
+          result = await ExportService.exportCSVWithPhotos(points, _currentProject);
           break;
         case 'geojson':
-          filename = await ExportService.exportGeoJSON(points, _currentProject);
+          result = await ExportService.exportGeoJSON(points, _currentProject);
           break;
         case 'dbexcel':
-          filename = await ExportService.exportDbExcel(points, _currentProject);
+          result = await ExportService.exportDbExcel(points, _currentProject);
           break;
       }
       hideLoading();
-      showToast(`Export erstellt: ${filename}`, 'success');
+      _showShareDialog(result.blob, result.filename);
     } catch (e) {
       hideLoading();
       console.error('Export failed:', e);
       showToast('Export fehlgeschlagen: ' + e.message, 'error');
+    }
+  }
+
+  /**
+   * Shows a dialog letting the user choose between sharing and downloading the export.
+   */
+  function _showShareDialog(blob, filename) {
+    const canShare = ExportService.canNativeShare();
+    const sizeMB = (blob.size / (1024 * 1024)).toFixed(1);
+    let html = `
+      <h3>Export fertig</h3>
+      <p class="share-info">${filename} (${sizeMB} MB)</p>`;
+
+    if (canShare) {
+      html += `
+      <div class="share-actions">
+        <button class="btn btn-primary btn-block" id="btn-share-export">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          Teilen
+        </button>
+        <button class="btn btn-secondary btn-block" id="btn-download-export">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Herunterladen
+        </button>
+      </div>`;
+    } else {
+      html += `
+      <div class="share-actions">
+        <button class="btn btn-primary btn-block" id="btn-download-export">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Herunterladen
+        </button>
+      </div>`;
+    }
+
+    html += `
+      <div style="margin-top:8px">
+        <button class="btn btn-secondary btn-block" onclick="App.closeDialog()">Abbrechen</button>
+      </div>`;
+
+    showDialog(html);
+
+    // Bind download button
+    document.getElementById('btn-download-export').addEventListener('click', () => {
+      ExportService.downloadFile(blob, filename);
+      closeDialog();
+      showToast(`Heruntergeladen: ${filename}`, 'success');
+    });
+
+    // Bind share button if available
+    if (canShare) {
+      document.getElementById('btn-share-export').addEventListener('click', async () => {
+        try {
+          await ExportService.shareFile(blob, filename);
+          closeDialog();
+          showToast('Export geteilt', 'success');
+        } catch (e) {
+          console.error('Share failed:', e);
+          showToast('Teilen fehlgeschlagen — wird heruntergeladen', 'error');
+          ExportService.downloadFile(blob, filename);
+          closeDialog();
+        }
+      });
     }
   }
 

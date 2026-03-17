@@ -311,7 +311,7 @@ const ExportService = (() => {
     const info = `SurvCompanion Export\n========================\nProjekt: ${projektNummer}\nExportiert am: ${now.toISOString()}\nAnzahl Punkte: ${points.length}\nAnzahl Fotos: ${photoCount}\n\nEnthaltene Dateien:\n- ${ds}_SurvComp_Export_QGIS.csv: Vollständige CSV (WGS84)\n- ${ds}_SurvComp_Export_glsurvey.csv: Reduzierte CSV (DB-Ref2016 GK)\n- fotos/: Ordner mit allen Fotos\n- export_info.txt: Diese Datei\n\nKoordinatensysteme:\n- QGIS-CSV: WGS84 (EPSG:4326)\n- glsurvey-CSV: DB-Ref2016 Gauß-Krüger\n`;
     zip.file('export_info.txt', info);
 
-    return _downloadZip(zip, `SurvComp_Export_${projektNummer}_${ds}.zip`);
+    return _buildZip(zip, `SurvComp_Export_${projektNummer}_${ds}.zip`);
   }
 
   // ==================== EXPORT: CSV WITH PHOTOS ====================
@@ -327,7 +327,7 @@ const ExportService = (() => {
     zip.file('export_info.txt', info);
 
     const ts = Date.now();
-    return _downloadZip(zip, `CSV_Export_${projektNummer}_${ts}.zip`);
+    return _buildZip(zip, `CSV_Export_${projektNummer}_${ts}.zip`);
   }
 
   // ==================== EXPORT: GEOJSON ====================
@@ -355,7 +355,6 @@ const ExportService = (() => {
 
     await _addPhotosToZip(zip, points, photoMap, '_fotos');
 
-    // Summary
     const summary = {
       export_info: {
         projekt: projektNummer,
@@ -377,7 +376,7 @@ const ExportService = (() => {
     zip.file('export_info.json', JSON.stringify(summary, null, 2));
 
     const ts = Date.now();
-    return _downloadZip(zip, `survcompanion_export_${projektNummer}_${ts}.zip`);
+    return _buildZip(zip, `survcompanion_export_${projektNummer}_${ts}.zip`);
   }
 
   // ==================== EXPORT: DB-EXCEL ====================
@@ -388,7 +387,6 @@ const ExportService = (() => {
 
     zip.file('vermessungspunkte.csv', _generateDbExcelCsv(points, photoMap));
 
-    // Photos flat (no subfolder)
     for (const p of points) {
       const photos = photoMap.get(p.punktId) || {};
       for (let slot = 1; slot <= 5; slot++) {
@@ -399,74 +397,62 @@ const ExportService = (() => {
     }
 
     const ts = Date.now();
-    return _downloadZip(zip, `db_excel_export_${projektNummer}_${ts}.zip`);
+    return _buildZip(zip, `db_excel_export_${projektNummer}_${ts}.zip`);
   }
 
-  // ==================== DOWNLOAD / SHARE HELPER ====================
+  // ==================== ZIP BUILD ====================
 
   /**
-   * Attempts to share the ZIP via the native Web Share API (like Android's SharePlus).
-   * Falls back to a file download if sharing is unavailable or fails.
-   *
-   * Web Share API support:
-   * - Android Chrome 76+, Edge 93+, Opera 63+   → full file sharing
-   * - iOS Safari 15+                             → full file sharing
-   * - Desktop Chrome 89+ (Windows/ChromeOS)      → full file sharing
-   * - Firefox (all)                               → NO file sharing (download fallback)
+   * Builds the ZIP blob and returns { blob, filename } for the caller
+   * to decide how to deliver (share vs download).
    */
-  async function _downloadZip(zip, filename) {
+  async function _buildZip(zip, filename) {
     const blob = await zip.generateAsync({
       type: 'blob',
       compression: 'DEFLATE',
       compressionOptions: { level: 6 },
     });
-
-    const file = new File([blob], filename, { type: 'application/zip' });
-
-    // 1. Try Web Share API with file (native share dialog)
-    const shared = await _tryNativeShare(file);
-    if (shared) return filename;
-
-    // 2. Fallback: trigger download
-    _triggerDownload(blob, filename);
-    return filename;
+    return { blob, filename };
   }
 
+  // ==================== SHARE / DOWNLOAD ====================
+
   /**
-   * Attempts native share. Returns true if user completed or cancelled the share,
-   * false if sharing is not available and we should fall back to download.
+   * Checks if the Web Share API can share files on this device.
    */
-  async function _tryNativeShare(file) {
-    // Check if the Web Share API with files is supported
+  function canNativeShare() {
     if (!navigator.share || !navigator.canShare) return false;
-
     try {
-      // canShare() can throw in some browsers, so wrap it
-      const shareData = { files: [file], title: 'SurvCompanion Export' };
-      if (!navigator.canShare(shareData)) return false;
-
-      await navigator.share(shareData);
-      return true; // shared successfully
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        // User cancelled the share dialog — that's fine, don't download
-        return true;
-      }
-      if (e.name === 'NotAllowedError') {
-        // Share requires user gesture — fall through to download
-        console.warn('Web Share not allowed (missing user gesture):', e.message);
-        return false;
-      }
-      // Other errors (e.g. DataError for too-large files) — fall through
-      console.warn('Web Share failed, falling back to download:', e.message);
+      const testFile = new File(['test'], 'test.zip', { type: 'application/zip' });
+      return navigator.canShare({ files: [testFile] });
+    } catch {
       return false;
     }
   }
 
   /**
-   * Downloads a blob as a file via a temporary anchor element.
+   * Opens the native OS share dialog (like Android SharePlus / iOS Share Sheet).
    */
-  function _triggerDownload(blob, filename) {
+  async function shareFile(blob, filename) {
+    const file = new File([blob], filename, { type: 'application/zip' });
+    const shareData = { files: [file], title: 'SurvCompanion Export' };
+
+    try {
+      if (!navigator.canShare(shareData)) {
+        throw new Error('Teilen von Dateien wird von diesem Browser nicht unterstützt');
+      }
+      await navigator.share(shareData);
+      return true;
+    } catch (e) {
+      if (e.name === 'AbortError') return true; // user cancelled — that's ok
+      throw e;
+    }
+  }
+
+  /**
+   * Downloads a blob as a file.
+   */
+  function downloadFile(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -474,12 +460,14 @@ const ExportService = (() => {
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    // Cleanup: small delay so browser can start the download
     setTimeout(() => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     }, 5000);
   }
 
-  return { exportUnified, exportCSVWithPhotos, exportGeoJSON, exportDbExcel };
+  return {
+    exportUnified, exportCSVWithPhotos, exportGeoJSON, exportDbExcel,
+    canNativeShare, shareFile, downloadFile,
+  };
 })();
