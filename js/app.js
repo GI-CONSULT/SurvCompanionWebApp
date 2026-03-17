@@ -9,6 +9,10 @@ const App = (() => {
   const _photoURLs = {};  // slot -> objectURL (for display, must be revoked)
   let _saving = false;    // debounce guard
   let _formDirty = false; // unsaved changes tracking
+  let _allPoints = [];    // cached points for filtering/pagination
+  let _filteredPoints = []; // after filter applied
+  let _currentPage = 0;
+  const PAGE_SIZE = 25;
 
   // ==================== INITIALIZATION ====================
 
@@ -245,61 +249,230 @@ const App = (() => {
       // Load presets
       _loadPresets();
 
-      const points = await DB.getPointsByProject(_currentProject);
-      const list = document.getElementById('point-list');
-      const empty = document.getElementById('no-points');
-
-      if (points.length === 0) {
-        list.innerHTML = '';
-        empty.style.display = 'flex';
-        return;
-      }
-      empty.style.display = 'none';
+      _allPoints = await DB.getPointsByProject(_currentProject);
 
       // Sort: imported-offen first, then by date descending
-      points.sort((a, b) => {
+      _allPoints.sort((a, b) => {
         const aOffen = a.importStatus === 'offen' ? 0 : 1;
         const bOffen = b.importStatus === 'offen' ? 0 : 1;
         if (aOffen !== bOffen) return aOffen - bOffen;
         return new Date(b.erfassungsdatum) - new Date(a.erfassungsdatum);
       });
 
-      let html = '';
-      for (const p of points) {
-        const photoCount = [p.foto1, p.foto2, p.foto3, p.foto4, p.foto5].filter(Boolean).length;
-        const date = new Date(p.erfassungsdatum).toLocaleDateString('de-DE');
-        const station = p.station != null ? ` km ${p.station}` : '';
-        const importClass = p.importStatus ? ` import-${p.importStatus}` : '';
-        const importBadge = p.importStatus === 'offen'
-          ? '<span class="badge badge-import-offen">OFFEN</span>'
-          : p.importStatus === 'erledigt'
-          ? '<span class="badge badge-import-erledigt">ERLEDIGT</span>'
-          : '';
-        html += `
-          <div class="list-item${importClass}" onclick="App.editPoint('${_escAttr(p.punktId)}')">
-            <div class="list-item-content">
-              <div class="list-item-title">
-                <span class="badge badge-${p.art}">${Models.displayName(Models.PunktArt, p.art)}</span>
-                ${_escHtml(p.punktId)}
-                ${importBadge}
-              </div>
-              <div class="list-item-subtitle">
-                Str. ${_escHtml(p.strecke)}${station} &middot; ${_escHtml(Models.displayName(Models.Seite, p.seite))} &middot; ${date}
-                ${photoCount > 0 ? ' &middot; ' + photoCount + ' Foto(s)' : ''}
-              </div>
-            </div>
-            <div class="list-item-actions">
-              <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeletePoint('${_escAttr(p.punktId)}')" title="Löschen">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-              </button>
-            </div>
-          </div>`;
-      }
-      list.innerHTML = html;
+      _currentPage = 0;
+      applyFilters();
     } catch (e) {
       console.error('showPoints failed:', e);
       showToast('Fehler beim Laden der Punkte', 'error');
     }
+  }
+
+  function applyFilters() {
+    const filterArt = document.getElementById('filter-art')?.value || '';
+    const filterStrecke = (document.getElementById('filter-strecke')?.value || '').trim().toLowerCase();
+    const filterImport = document.getElementById('filter-import')?.value || '';
+    const kmGroup = document.getElementById('filter-km-group')?.checked || false;
+
+    _filteredPoints = _allPoints.filter(p => {
+      if (filterArt && p.art !== filterArt) return false;
+      if (filterStrecke && !(p.strecke || '').toLowerCase().includes(filterStrecke)) return false;
+      if (filterImport === 'offen' && p.importStatus !== 'offen') return false;
+      if (filterImport === 'erledigt' && p.importStatus !== 'erledigt') return false;
+      if (filterImport === 'none' && p.importStatus) return false;
+      return true;
+    });
+
+    // Update count
+    const countEl = document.getElementById('filter-count');
+    if (countEl) {
+      countEl.textContent = `${_filteredPoints.length} / ${_allPoints.length}`;
+    }
+
+    const list = document.getElementById('point-list');
+    const empty = document.getElementById('no-points');
+    const pagination = document.getElementById('pagination');
+
+    if (_allPoints.length === 0) {
+      list.innerHTML = '';
+      empty.style.display = 'flex';
+      pagination.style.display = 'none';
+      return;
+    }
+
+    if (_filteredPoints.length === 0) {
+      list.innerHTML = '<div class="empty-state"><p>Keine Punkte für diesen Filter</p></div>';
+      empty.style.display = 'none';
+      pagination.style.display = 'none';
+      return;
+    }
+
+    empty.style.display = 'none';
+
+    if (kmGroup) {
+      _renderGroupedView(list);
+      pagination.style.display = 'none';
+    } else {
+      _renderPagedView(list);
+      _updatePagination();
+    }
+  }
+
+  /** Renders a flat paginated list. */
+  function _renderPagedView(list) {
+    const totalPages = Math.ceil(_filteredPoints.length / PAGE_SIZE);
+    if (_currentPage >= totalPages) _currentPage = totalPages - 1;
+    if (_currentPage < 0) _currentPage = 0;
+
+    const start = _currentPage * PAGE_SIZE;
+    const pagePoints = _filteredPoints.slice(start, start + PAGE_SIZE);
+
+    list.innerHTML = pagePoints.map(p => _renderPointItem(p)).join('');
+  }
+
+  function _updatePagination() {
+    const pagination = document.getElementById('pagination');
+    const totalPages = Math.ceil(_filteredPoints.length / PAGE_SIZE);
+
+    if (totalPages <= 1) {
+      pagination.style.display = 'none';
+      return;
+    }
+
+    pagination.style.display = 'flex';
+    document.getElementById('page-prev').disabled = _currentPage <= 0;
+    document.getElementById('page-next').disabled = _currentPage >= totalPages - 1;
+    document.getElementById('page-info').textContent =
+      `Seite ${_currentPage + 1} / ${totalPages}`;
+  }
+
+  function prevPage() {
+    if (_currentPage > 0) { _currentPage--; applyFilters(); }
+  }
+  function nextPage() {
+    const totalPages = Math.ceil(_filteredPoints.length / PAGE_SIZE);
+    if (_currentPage < totalPages - 1) { _currentPage++; applyFilters(); }
+  }
+
+  /**
+   * Extract km number from a PS4 punkt ID.
+   * Patterns: "123-01", "T123-01", "N123-01" → km=123
+   * Returns null if no match.
+   */
+  function _extractKm(punktId) {
+    const m = String(punktId).match(/^[TNtn]?(\d+)-\d+$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  /** Renders grouped view: PS4 by km, others flat. */
+  function _renderGroupedView(list) {
+    const ps4Points = [];
+    const otherPoints = [];
+
+    for (const p of _filteredPoints) {
+      if (p.art === 'ps4') ps4Points.push(p);
+      else otherPoints.push(p);
+    }
+
+    // Group PS4 by km
+    const kmGroups = new Map(); // km -> points[]
+    const unspecified = [];
+    for (const p of ps4Points) {
+      const km = _extractKm(p.punktId);
+      if (km !== null) {
+        if (!kmGroups.has(km)) kmGroups.set(km, []);
+        kmGroups.get(km).push(p);
+      } else {
+        unspecified.push(p);
+      }
+    }
+
+    // Sort km groups numerically
+    const sortedKms = [...kmGroups.keys()].sort((a, b) => a - b);
+
+    let html = '';
+
+    // Render km groups
+    for (const km of sortedKms) {
+      const groupPoints = kmGroups.get(km);
+      const openCount = groupPoints.filter(p => p.importStatus === 'offen').length;
+      const doneCount = groupPoints.filter(p => p.importStatus === 'erledigt').length;
+      let statusHtml = '';
+      if (openCount > 0) statusHtml += `<span class="badge badge-import-offen">${openCount} offen</span> `;
+      if (doneCount > 0) statusHtml += `<span class="badge badge-import-erledigt">${doneCount} erledigt</span>`;
+
+      html += `
+        <div class="km-group" id="km-group-${km}">
+          <div class="km-group-header" onclick="App.toggleKmGroup(${km})">
+            <h3>km ${km} <span class="km-count">(${groupPoints.length})</span></h3>
+            <span class="km-status">${statusHtml}</span>
+            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="km-group-body">
+            ${groupPoints.map(p => _renderPointItem(p)).join('')}
+          </div>
+        </div>`;
+    }
+
+    // Unspecified PS4 group
+    if (unspecified.length > 0) {
+      html += `
+        <div class="km-group" id="km-group-unspec">
+          <div class="km-group-header" onclick="App.toggleKmGroup('unspec')">
+            <h3>Unspezifisch <span class="km-count">(${unspecified.length})</span></h3>
+            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="km-group-body">
+            ${unspecified.map(p => _renderPointItem(p)).join('')}
+          </div>
+        </div>`;
+    }
+
+    // Non-PS4 points flat
+    if (otherPoints.length > 0) {
+      if (ps4Points.length > 0) {
+        html += `<div style="padding:8px 4px 4px;font-size:12px;font-weight:600;color:var(--on-surface-secondary);text-transform:uppercase;letter-spacing:0.5px">Andere Punktarten</div>`;
+      }
+      html += otherPoints.map(p => _renderPointItem(p)).join('');
+    }
+
+    list.innerHTML = html;
+  }
+
+  function toggleKmGroup(km) {
+    const el = document.getElementById(`km-group-${km}`);
+    if (el) el.classList.toggle('expanded');
+  }
+
+  /** Renders a single point list item. */
+  function _renderPointItem(p) {
+    const photoCount = [p.foto1, p.foto2, p.foto3, p.foto4, p.foto5].filter(Boolean).length;
+    const date = new Date(p.erfassungsdatum).toLocaleDateString('de-DE');
+    const station = p.station != null ? ` km ${p.station}` : '';
+    const importClass = p.importStatus ? ` import-${p.importStatus}` : '';
+    const importBadge = p.importStatus === 'offen'
+      ? '<span class="badge badge-import-offen">OFFEN</span>'
+      : p.importStatus === 'erledigt'
+      ? '<span class="badge badge-import-erledigt">ERLEDIGT</span>'
+      : '';
+    return `
+      <div class="list-item${importClass}" onclick="App.editPoint('${_escAttr(p.punktId)}')">
+        <div class="list-item-content">
+          <div class="list-item-title">
+            <span class="badge badge-${p.art}">${Models.displayName(Models.PunktArt, p.art)}</span>
+            ${_escHtml(p.punktId)}
+            ${importBadge}
+          </div>
+          <div class="list-item-subtitle">
+            Str. ${_escHtml(p.strecke)}${station} &middot; ${_escHtml(Models.displayName(Models.Seite, p.seite))} &middot; ${date}
+            ${photoCount > 0 ? ' &middot; ' + photoCount + ' Foto(s)' : ''}
+          </div>
+        </div>
+        <div class="list-item-actions">
+          <button class="icon-btn" onclick="event.stopPropagation();App.confirmDeletePoint('${_escAttr(p.punktId)}')" title="Löschen">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          </button>
+        </div>
+      </div>`;
   }
 
   async function confirmDeletePoint(punktId) {
@@ -1403,6 +1576,8 @@ const App = (() => {
     togglePresets, savePresets,
     // Import
     triggerImport, onGeoJsonSelected,
+    // Filters, pagination, grouping
+    applyFilters, prevPage, nextPage, toggleKmGroup,
     // Internal (exposed for dialog callback)
     _doCancel,
   };

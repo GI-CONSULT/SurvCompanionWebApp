@@ -88,9 +88,44 @@
           </div>
         </div>
       </div>
+      <!-- Filter & Ansicht -->
+      <div class="filter-bar">
+        <div class="filter-row">
+          <select id="filter-art" class="filter-select" onchange="App.applyFilters()">
+            <option value="">Alle Arten</option>
+            <option value="ps0">PS0</option>
+            <option value="ps1">PS1</option>
+            <option value="ps2">PS2</option>
+            <option value="ps3">PS3</option>
+            <option value="ps4">PS4</option>
+            <option value="tp">TP</option>
+            <option value="lhp">LHP</option>
+          </select>
+          <input type="text" id="filter-strecke" class="filter-input" placeholder="Strecke" oninput="App.applyFilters()">
+          <select id="filter-import" class="filter-select" onchange="App.applyFilters()">
+            <option value="">Alle Status</option>
+            <option value="offen">Offen</option>
+            <option value="erledigt">Erledigt</option>
+            <option value="none">Ohne Import</option>
+          </select>
+        </div>
+        <div class="filter-row filter-row-secondary">
+          <div class="checkbox-group filter-checkbox">
+            <input type="checkbox" id="filter-km-group" onchange="App.applyFilters()">
+            <label for="filter-km-group">PS4 nach km gruppieren</label>
+          </div>
+          <span id="filter-count" class="filter-count"></span>
+        </div>
+      </div>
       <div id="point-list" class="list"></div>
       <div id="no-points" class="empty-state" style="display:none">
         <p>Keine Punkte erfasst</p>
+      </div>
+      <!-- Pagination -->
+      <div id="pagination" class="pagination" style="display:none">
+        <button class="pagination-btn" id="page-prev" onclick="App.prevPage()">&laquo;</button>
+        <span id="page-info" class="page-info"></span>
+        <button class="pagination-btn" id="page-next" onclick="App.nextPage()">&raquo;</button>
       </div>
     </main>
     <button class="fab" onclick="App.showPointForm()" title="Neuen Punkt erfassen">
