@@ -402,8 +402,18 @@ const ExportService = (() => {
     return _downloadZip(zip, `db_excel_export_${projektNummer}_${ts}.zip`);
   }
 
-  // ==================== DOWNLOAD HELPER ====================
+  // ==================== DOWNLOAD / SHARE HELPER ====================
 
+  /**
+   * Attempts to share the ZIP via the native Web Share API (like Android's SharePlus).
+   * Falls back to a file download if sharing is unavailable or fails.
+   *
+   * Web Share API support:
+   * - Android Chrome 76+, Edge 93+, Opera 63+   → full file sharing
+   * - iOS Safari 15+                             → full file sharing
+   * - Desktop Chrome 89+ (Windows/ChromeOS)      → full file sharing
+   * - Firefox (all)                               → NO file sharing (download fallback)
+   */
   async function _downloadZip(zip, filename) {
     const blob = await zip.generateAsync({
       type: 'blob',
@@ -411,30 +421,64 @@ const ExportService = (() => {
       compressionOptions: { level: 6 },
     });
 
-    // Try native share API on mobile, fallback to download
-    if (navigator.share && navigator.canShare && navigator.canShare({ files: [new File([blob], filename)] })) {
-      try {
-        await navigator.share({
-          files: [new File([blob], filename, { type: 'application/zip' })],
-          title: 'SurvCompanion Export',
-        });
-        return filename;
-      } catch (e) {
-        // User cancelled or share failed, fall through to download
-        if (e.name === 'AbortError') return filename;
-      }
-    }
+    const file = new File([blob], filename, { type: 'application/zip' });
 
-    // Fallback: trigger download
+    // 1. Try Web Share API with file (native share dialog)
+    const shared = await _tryNativeShare(file);
+    if (shared) return filename;
+
+    // 2. Fallback: trigger download
+    _triggerDownload(blob, filename);
+    return filename;
+  }
+
+  /**
+   * Attempts native share. Returns true if user completed or cancelled the share,
+   * false if sharing is not available and we should fall back to download.
+   */
+  async function _tryNativeShare(file) {
+    // Check if the Web Share API with files is supported
+    if (!navigator.share || !navigator.canShare) return false;
+
+    try {
+      // canShare() can throw in some browsers, so wrap it
+      const shareData = { files: [file], title: 'SurvCompanion Export' };
+      if (!navigator.canShare(shareData)) return false;
+
+      await navigator.share(shareData);
+      return true; // shared successfully
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        // User cancelled the share dialog — that's fine, don't download
+        return true;
+      }
+      if (e.name === 'NotAllowedError') {
+        // Share requires user gesture — fall through to download
+        console.warn('Web Share not allowed (missing user gesture):', e.message);
+        return false;
+      }
+      // Other errors (e.g. DataError for too-large files) — fall through
+      console.warn('Web Share failed, falling back to download:', e.message);
+      return false;
+    }
+  }
+
+  /**
+   * Downloads a blob as a file via a temporary anchor element.
+   */
+  function _triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-    return filename;
+    // Cleanup: small delay so browser can start the download
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 5000);
   }
 
   return { exportUnified, exportCSVWithPhotos, exportGeoJSON, exportDbExcel };
