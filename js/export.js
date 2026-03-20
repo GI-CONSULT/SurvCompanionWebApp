@@ -81,25 +81,17 @@ const ExportService = (() => {
     return Models.displayName(enumObj, name);
   }
 
-  // ==================== PHOTO LOADING ====================
+  // ==================== PHOTO HELPERS ====================
 
   /**
-   * Loads all photos for a list of points from IndexedDB.
-   * Returns a Map: punktId -> { slot -> { buffer, mimeType, fileName } }
+   * Returns which photo slots a point has.
    */
-  async function _loadAllPhotos(points) {
-    const photoMap = new Map();
-    for (const p of points) {
-      const photos = {};
-      for (let slot = 1; slot <= 5; slot++) {
-        if (p[`foto${slot}`]) {
-          const data = await DB.getPhotoAsArrayBuffer(p.punktId, slot);
-          if (data) photos[slot] = data;
-        }
-      }
-      photoMap.set(p.punktId, photos);
+  function _photoSlotsFor(point) {
+    const slots = [];
+    for (let slot = 1; slot <= 5; slot++) {
+      if (point[`foto${slot}`]) slots.push(slot);
     }
-    return photoMap;
+    return slots;
   }
 
   // ==================== QGIS CSV ====================
@@ -204,13 +196,11 @@ const ExportService = (() => {
 
   // ==================== DB-EXCEL CSV ====================
 
-  function _generateDbExcelCsv(points, photoMap) {
+  function _generateDbExcelCsv(points) {
     let csv = 'Dateiname\tStrecke\tVermarkungsträger\tMastnummer\tBolzenlänge/Offset\tTargetseite (L/R)\tAnbringung (neu/at)\tP.-Nr.\tKilometrierungswert\tNummerierungsbezirk\tVermarkungsdatum\n';
 
     for (const p of points) {
-      const photos = photoMap.get(p.punktId) || {};
-      for (let slot = 1; slot <= 5; slot++) {
-        if (!p[`foto${slot}`] || !photos[slot]) continue;
+      for (const slot of _photoSlotsFor(p)) {
         const dateiname = `${p.punktId}_foto${slot}.jpg`;
         let traeger = '';
         if (p.ps4GvBolzenTraeger) traeger = _dn(Models.PS4GvBolzenTraeger, p.ps4GvBolzenTraeger);
@@ -294,16 +284,17 @@ const ExportService = (() => {
 
   // ==================== ADD PHOTOS TO ZIP ====================
 
-  async function _addPhotosToZip(zip, points, photoMap, folder = 'fotos') {
+  /**
+   * Adds photos to ZIP one at a time to avoid loading all into memory.
+   */
+  async function _addPhotosToZip(zip, points, folder = 'fotos') {
     let count = 0;
     for (const p of points) {
-      const photos = photoMap.get(p.punktId) || {};
-      for (let slot = 1; slot <= 5; slot++) {
-        const photoData = photos[slot];
-        if (!photoData) continue;
-        const ext = photoData.mimeType === 'image/png' ? '.png' : '.jpg';
-        const name = `${p.punktId}_foto${slot}${ext}`;
-        zip.file(`${folder}/${name}`, photoData.buffer);
+      for (const slot of _photoSlotsFor(p)) {
+        const data = await DB.getPhotoAsArrayBuffer(p.punktId, slot);
+        if (!data) continue;
+        const ext = data.mimeType === 'image/png' ? '.png' : '.jpg';
+        zip.file(`${folder}/${p.punktId}_foto${slot}${ext}`, data.buffer);
         count++;
       }
     }
@@ -313,7 +304,6 @@ const ExportService = (() => {
   // ==================== EXPORT: UNIFIED ====================
 
   async function exportUnified(points, projektNummer) {
-    const photoMap = await _loadAllPhotos(points);
     const zip = new JSZip();
 
     const now = new Date();
@@ -323,8 +313,8 @@ const ExportService = (() => {
     zip.file(`${ds}_SurvComp_Export_QGIS.csv`, _generateQgisCsv(points, projektNummer));
     // glsurvey CSV
     zip.file(`${ds}_SurvComp_Export_glsurvey.csv`, _generateGlSurveyCsv(points));
-    // Photos
-    const photoCount = await _addPhotosToZip(zip, points, photoMap);
+    // Photos (loaded one at a time)
+    const photoCount = await _addPhotosToZip(zip, points);
 
     // Info
     const info = `SurvCompanion Export\n========================\nProjekt: ${projektNummer}\nExportiert am: ${now.toISOString()}\nAnzahl Punkte: ${points.length}\nAnzahl Fotos: ${photoCount}\n\nEnthaltene Dateien:\n- ${ds}_SurvComp_Export_QGIS.csv: Vollständige CSV (WGS84)\n- ${ds}_SurvComp_Export_glsurvey.csv: Reduzierte CSV (DB-Ref2016 GK)\n- fotos/: Ordner mit allen Fotos\n- export_info.txt: Diese Datei\n\nKoordinatensysteme:\n- QGIS-CSV: WGS84 (EPSG:4326)\n- glsurvey-CSV: DB-Ref2016 Gauß-Krüger\n`;
@@ -336,11 +326,10 @@ const ExportService = (() => {
   // ==================== EXPORT: CSV WITH PHOTOS ====================
 
   async function exportCSVWithPhotos(points, projektNummer) {
-    const photoMap = await _loadAllPhotos(points);
     const zip = new JSZip();
 
     zip.file('vermessungspunkte.csv', _generateQgisCsv(points, projektNummer));
-    const photoCount = await _addPhotosToZip(zip, points, photoMap);
+    const photoCount = await _addPhotosToZip(zip, points);
 
     const info = `CSV Export Information\n========================\nProjekt: ${projektNummer}\nExportiert am: ${new Date().toISOString()}\nAnzahl Punkte: ${points.length}\nAnzahl Fotos: ${photoCount}\n`;
     zip.file('export_info.txt', info);
@@ -352,15 +341,12 @@ const ExportService = (() => {
   // ==================== EXPORT: GEOJSON ====================
 
   async function exportGeoJSON(points, projektNummer) {
-    const photoMap = await _loadAllPhotos(points);
     const zip = new JSZip();
 
     for (const p of points) {
-      const photos = photoMap.get(p.punktId) || {};
-      const fotoPfade = [];
-      for (let slot = 1; slot <= 5; slot++) {
-        if (photos[slot]) fotoPfade.push(`_fotos/${p.punktId}_foto${slot}.jpg`);
-      }
+      const fotoPfade = _photoSlotsFor(p).map(
+        slot => `_fotos/${p.punktId}_foto${slot}.jpg`
+      );
       const coords = [p.gpsLongitude || 0, p.gpsLatitude || 0];
       if (p.hoehe != null) coords.push(p.hoehe);
 
@@ -372,7 +358,7 @@ const ExportService = (() => {
       zip.file(`${p.punktId}.geojson`, JSON.stringify(geojson));
     }
 
-    await _addPhotosToZip(zip, points, photoMap, '_fotos');
+    await _addPhotosToZip(zip, points, '_fotos');
 
     const summary = {
       export_info: {
@@ -401,17 +387,16 @@ const ExportService = (() => {
   // ==================== EXPORT: DB-EXCEL ====================
 
   async function exportDbExcel(points, projektNummer) {
-    const photoMap = await _loadAllPhotos(points);
     const zip = new JSZip();
 
-    zip.file('vermessungspunkte.csv', _generateDbExcelCsv(points, photoMap));
+    zip.file('vermessungspunkte.csv', _generateDbExcelCsv(points));
 
+    // Add photos one at a time
     for (const p of points) {
-      const photos = photoMap.get(p.punktId) || {};
-      for (let slot = 1; slot <= 5; slot++) {
-        const photoData = photos[slot];
-        if (!photoData) continue;
-        zip.file(`${p.punktId}_foto${slot}.jpg`, photoData.buffer);
+      for (const slot of _photoSlotsFor(p)) {
+        const data = await DB.getPhotoAsArrayBuffer(p.punktId, slot);
+        if (!data) continue;
+        zip.file(`${p.punktId}_foto${slot}.jpg`, data.buffer);
       }
     }
 

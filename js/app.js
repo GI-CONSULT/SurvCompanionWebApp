@@ -906,16 +906,11 @@ const App = (() => {
       return;
     }
 
-    // Warn if file is very large (>15 MB)
-    if (file.size > 15 * 1024 * 1024) {
-      showToast('Foto ist sehr groß (' + (file.size / (1024*1024)).toFixed(1) + ' MB). Komprimierung empfohlen.', 'error');
-    }
-
-    // Compress if > 3 MB
+    // Always compress images to keep each photo under ~1 MB
     let blob = file;
-    if (file.size > 3 * 1024 * 1024 && file.type.startsWith('image/')) {
+    if (file.type.startsWith('image/')) {
       try {
-        blob = await _compressImage(file, 1920, 0.85);
+        blob = await _compressImageToTarget(file, 1024 * 1024);
       } catch (e) {
         console.warn('Compression failed, using original:', e);
         blob = file;
@@ -939,31 +934,44 @@ const App = (() => {
   }
 
   /**
-   * Compresses an image file using canvas.
-   * Returns a new Blob.
+   * Compresses an image to stay under a target file size (in bytes).
+   * Tries progressively smaller dimensions and lower quality until
+   * the result is under the target. If the original is already small
+   * enough, it is returned unchanged.
    */
-  function _compressImage(file, maxDim, quality) {
+  function _compressImageToTarget(file, targetBytes) {
+    if (file.size <= targetBytes) return Promise.resolve(file);
+
     return new Promise((resolve, reject) => {
       const img = new Image();
       const url = URL.createObjectURL(file);
-      img.onload = () => {
+      img.onload = async () => {
         URL.revokeObjectURL(url);
-        let w = img.width, h = img.height;
-        if (w > maxDim || h > maxDim) {
-          const scale = maxDim / Math.max(w, h);
-          w = Math.round(w * scale);
-          h = Math.round(h * scale);
+        const steps = [
+          { maxDim: 1920, quality: 0.80 },
+          { maxDim: 1600, quality: 0.75 },
+          { maxDim: 1280, quality: 0.70 },
+          { maxDim: 1024, quality: 0.60 },
+        ];
+        let result = null;
+        for (const { maxDim, quality } of steps) {
+          let w = img.width, h = img.height;
+          if (w > maxDim || h > maxDim) {
+            const scale = maxDim / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          result = await new Promise(r =>
+            canvas.toBlob(b => r(b), 'image/jpeg', quality)
+          );
+          if (!result) { reject(new Error('Canvas toBlob failed')); return; }
+          if (result.size <= targetBytes) break;
         }
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob(
-          (blob) => blob ? resolve(blob) : reject(new Error('Canvas toBlob failed')),
-          'image/jpeg',
-          quality
-        );
+        resolve(result);
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
@@ -1176,6 +1184,7 @@ const App = (() => {
       ExportService.downloadFile(blob, filename);
       closeDialog();
       showToast(`Heruntergeladen: ${filename}`, 'success');
+      _showDeleteAfterExportDialog();
     });
 
     // Bind share button if available
@@ -1185,6 +1194,7 @@ const App = (() => {
           await ExportService.shareFile(blob, filename);
           closeDialog();
           showToast('Export geteilt', 'success');
+          _showDeleteAfterExportDialog();
         } catch (e) {
           console.error('Share failed:', e);
           showToast('Teilen fehlgeschlagen — wird heruntergeladen', 'error');
@@ -1193,6 +1203,46 @@ const App = (() => {
         }
       });
     }
+  }
+
+  /**
+   * After a successful export, ask the user if they want to delete the
+   * exported project data to free up IndexedDB space.
+   */
+  function _showDeleteAfterExportDialog() {
+    setTimeout(() => {
+      const projekt = _currentProject;
+      const html = `
+        <h3>Speicher freigeben?</h3>
+        <p>Der Export war erfolgreich. Möchten Sie die Daten des Projekts
+           <strong>${projekt}</strong> aus dem Gerätespeicher löschen, um Platz freizugeben?</p>
+        <p style="color:var(--warning-color,#e67e22);font-size:0.9em">
+          Stellen Sie sicher, dass der Export vollständig gespeichert wurde, bevor Sie die Daten löschen.</p>
+        <div class="share-actions">
+          <button class="btn btn-primary btn-block" id="btn-delete-after-export"
+                  style="background:var(--danger-color,#c0392b)">
+            Daten löschen
+          </button>
+          <button class="btn btn-secondary btn-block" onclick="App.closeDialog()">
+            Behalten
+          </button>
+        </div>`;
+      showDialog(html);
+      document.getElementById('btn-delete-after-export').addEventListener('click', async () => {
+        closeDialog();
+        showLoading('Lösche Projektdaten...');
+        try {
+          await DB.deleteProject(projekt);
+          hideLoading();
+          showToast(`Projekt ${projekt} gelöscht — Speicher freigegeben`, 'success');
+          await showProjectList();
+        } catch (e) {
+          hideLoading();
+          console.error('Delete after export failed:', e);
+          showToast('Löschen fehlgeschlagen: ' + e.message, 'error');
+        }
+      });
+    }, 500);
   }
 
   // ==================== GEOJSON IMPORT ====================
